@@ -1,6 +1,6 @@
-# Module 1: Build and train models
+# Module 1: Fine-tune LLM
 
-In this module, you will create a JupyterLab space in SageMaker Studio and clone this GitHub repository in that space. You will then build and train models using a Jupyter notebook in the newly created JupyterLab space. 
+In this module, you will create a JupyterLab space in SageMaker Studio and clone this GitHub repository in that space. You will then fine-tune a Large Language Model (LLM) using a Jupyter notebook in the newly created JupyterLab space. 
 
 The JupyterLab application is a web-based interactive development environment (IDE) for notebooks, code, and data. A [JupyterLab space](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl.html) is a private space within SageMaker Studio that manages the storage and compute resources needed to run the JupyterLab application. 
 
@@ -26,7 +26,9 @@ The JupyterLab application is a web-based interactive development environment (I
 
 	<img src="../images/module_01/jupyterlab_home.png" alt="JupyterLab home" width="700px" />
 
-
+> [!NOTE]
+> Remainder of this section will need to be changed base on new notebook
+> 
 ## Clone the GitHub repository
 
 1. From the **File** menu, choose **New >> Terminal**
