@@ -3,28 +3,22 @@ import os
 import joblib
 import subprocess
 
-import xgboost
-import numpy as np
-import pandas as pd
-
 import boto3
 
+# Download Model
+import json
+import sagemaker
 from sagemaker import get_execution_role
-from sagemaker.s3 import S3Downloader
-from sagemaker.pipeline import PipelineModel
-from sagemaker.utils import unique_name_from_base
-from sagemaker.image_uris import retrieve as get_image_uri
+from sagemaker.huggingface import HuggingFaceModel, get_huggingface_llm_image_uri
 
-from sagemaker.serve import ModelServer
-from sagemaker.serve import InferenceSpec
-from sagemaker.serve.builder.model_builder import ModelBuilder
-from sagemaker.serve.builder.schema_builder import SchemaBuilder
-from sagemaker.serve import CustomPayloadTranslator
+sagemaker_session = sagemaker.Session()
 
-session = boto3.session.Session()
-current_region = session.region_name
+model_id = "meta-llama/Meta-Llama-3-8B-Instruct"
 
-def get_model_artifacts_for_last_job(job_name_prefix):
+bucket_name = sagemaker_session.default_bucket()
+job_prefix = f"train-{model_id.split('/')[-1].replace('.', '-')}"
+
+def get_last_job_name(job_name_prefix):
     import boto3
     sagemaker_client = boto3.client('sagemaker')
     
@@ -37,150 +31,78 @@ def get_model_artifacts_for_last_job(job_name_prefix):
                     'Operator': 'Contains',
                     'Value': job_name_prefix
                 },
+                {
+                    'Name': 'TrainingJobStatus',
+                    'Operator': 'Equals',
+                    'Value': "Completed"
+                }
             ]
         },
         SortBy='CreationTime',
         SortOrder='Descending',
         MaxResults=1)
     
-    return search_response['Results'][0]['TrainingJob']['ModelArtifacts']['S3ModelArtifacts']
+    return search_response['Results'][0]['TrainingJob']['TrainingJobName']
 
-def load_models(sklearn_job_prefix, xgboost_job_prefix):
-    subprocess.call(['rm', '-rf', 'sklearn_model/'])
-    subprocess.call(['rm', '-rf', 'xgboost_model/'])
-    
-    sklearn_s3_model_artifacts = get_model_artifacts_for_last_job(sklearn_job_prefix)
-    print(f"SKLearn S3 model artifacts: {sklearn_s3_model_artifacts}")
-    xgboost_s3_model_artifacts = get_model_artifacts_for_last_job(xgboost_job_prefix)
-    print(f"XGBoost S3 model artifacts: {xgboost_s3_model_artifacts}")
+job_name = get_last_job_name(job_prefix)
 
-    print(S3Downloader.download(sklearn_s3_model_artifacts, "sklearn_model/"))
-    print(S3Downloader.download(xgboost_s3_model_artifacts, "xgboost_model/"))
+# Inference configurations
+instance_count = 1
+instance_type = "ml.g5.8xlarge"
+number_of_gpu = 1
+health_check_timeout = 700
 
-    subprocess.call(['tar', '-xvzf', 'sklearn_model/model.tar.gz', '-C', 'sklearn_model/'])
-    subprocess.call(['rm', 'sklearn_model/model.tar.gz'])
-    subprocess.call(['tar', '-xvzf', 'xgboost_model/model.tar.gz', '-C', 'xgboost_model/'])
-    subprocess.call(['rm', 'xgboost_model/model.tar.gz'])
+image_uri = get_huggingface_llm_image_uri(
+    "huggingface",
+    version="1.4"
+)
 
-    featurizer = joblib.load('sklearn_model/sklearn_model.joblib')
-    booster = xgboost.Booster()
-    booster.load_model('xgboost_model/xgboost_model.bin')
+model = HuggingFaceModel(
+    image_uri=image_uri,
+    model_data=f"s3://{bucket_name}/{job_name}/{job_name}/output/model.tar.gz",
+    role=get_execution_role(),
+    env={
+        'HF_MODEL_ID': "/opt/ml/model", # path to where sagemaker stores the model
+        'SM_NUM_GPUS': json.dumps(number_of_gpu), # Number of GPU used per replica
+        'HF_MODEL_QUANTIZE': "bitsandbytes"
+    }
+)
 
-    return featurizer, booster
+predictor = model.deploy(
+    initial_instance_count=instance_count,
+    instance_type=instance_type,
+    container_startup_health_check_timeout=health_check_timeout,
+    model_data_download_timeout=3600
+)
 
-def build_sklearn_sagemaker_model(role, featurizer):
-    feature_columns_names = ['Type', 'Air temperature [K]', 'Process temperature [K]', 'Rotational speed [rpm]', 'Torque [Nm]', 'Tool wear [min]']
-    
-    class SklearnRequestTranslator(CustomPayloadTranslator):
-        # Converts the request payload to bytes - runs on the client side
-        def serialize_payload_to_bytes(self, payload: object) -> bytes:
-            return payload.encode("utf-8")
-            
-        # Converts the request byte stream to dataframe - runs on the server side
-        def deserialize_payload_from_stream(self, stream) -> pd.DataFrame:
-            df = pd.read_csv(io.BytesIO(stream.read()), header=None)
-            df.columns = feature_columns_names
-            return df
-    
-    class SklearnModelSpec(InferenceSpec):
-        def invoke(self, input_object: object, model: object):
-            features = model.transform(input_object)
-            return features
-    
-        def load(self, model_dir: str):
-            model_path = model_dir+'/sklearn_model.joblib'
-            print(model_path)
-            model = joblib.load(model_path)
-            return model
-    
-    schema_builder=SchemaBuilder(
-        sample_input="L,298.4,308.2,1582,70.7,216",
-        sample_output=np.array([0.647088,0.467287,-0.191472,0.720195,-0.536976,0.0,1.0,0.0]),
-        input_translator=SklearnRequestTranslator()
+# Predict
+from sagemaker.huggingface.model import HuggingFacePredictor
+
+endpoint_name = "<ENDPOINT_NAME>" #Required if you want to create a predictor without running the previous code
+
+if 'predictor' not in locals() and 'predictor' not in globals():
+    print("Create predictor")
+    predictor = HuggingFacePredictor(
+        endpoint_name=endpoint_name
     )
 
-    model_file_path="sklearn_model/sklearn_model.joblib"
-    os.makedirs(os.path.dirname(model_file_path), exist_ok=True)
-    joblib.dump(featurizer, model_file_path)
-
-    model_builder = ModelBuilder(
-        model_path="sklearn_model/",
-        name="sklearn_featurizer",
-        dependencies={"requirements": "requirements_inference.txt"},
-        image_uri=get_image_uri(framework="sklearn", region=current_region, version="1.2-1"),
-        schema_builder=schema_builder,
-        model_server=ModelServer.TORCHSERVE,
-        inference_spec=SklearnModelSpec(),
-        role_arn=role)
+base_prompt = f"""
+    <|begin_of_text|><|start_header_id|>user<|end_header_id|>
+    {{question}}
+    <|eot_id|><|start_header_id|>assistant<|end_header_id|>
     
-    return model_builder.build()
+"""
 
-def build_xgboost_sagemaker_model(role, booster):
+prompt = base_prompt.format(question="What is the context window of Anthropic Claude 2.1 model?")
 
-    class RequestTranslator(CustomPayloadTranslator):
-        # Convert the request dataframe to bytes - runs on the client side
-        def serialize_payload_to_bytes(self, payload: object) -> bytes:
-            buffer = io.BytesIO()
-            np.save(buffer, payload)
-            return buffer.getvalue()
-            
-        # Convert the byte stream to XGBoost data matrix - runs on the server side
-        def deserialize_payload_from_stream(self, stream) -> xgboost.DMatrix:
-            np_array = np.load(io.BytesIO(stream.read())).reshape((1, -1))
-            dmatrix = xgboost.DMatrix(np_array)
-            return dmatrix
+predictor.predict({
+	"inputs": prompt,
+    "parameters": {
+        "n_predict": -1,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stop": ["<|start_header_id|>", "<|eot_id|>", "<|start_header_id|>user<|end_header_id|>", "assistant"]
+    }
+})
 
-    schema_builder=SchemaBuilder(
-        sample_input=np.array([0.647088,0.467287,-0.191472,0.720195,-0.536976,0.0,1.0,0.0]),
-        sample_output=np.array([0.15388985]),
-        input_translator=RequestTranslator()
-    )
 
-    model_file_path = 'xgboost_model/xgboost_model.bin'
-    os.makedirs(os.path.dirname(model_file_path), exist_ok=True)
-    booster.save_model(model_file_path)
-
-    model_builder = ModelBuilder(
-        model=booster,
-        model_path="xgboost_model/",
-        dependencies={"requirements": "requirements_inference.txt"},
-        schema_builder=schema_builder,
-        role_arn=role)
-    
-    return model_builder.build()
-
-def build_pipeline_model(role, sklearn_model, xgboost_model):
-    pipeline_model_name = unique_name_from_base("sagemaker-btd-pipeline-model")
-
-    pipeline_model = PipelineModel(
-        name=pipeline_model_name, 
-        role=role,
-        models=[
-            sklearn_model, 
-            xgboost_model])
-
-    return pipeline_model
-
-def deploy_model(pipeline_model, instance_type, wait):
-    endpoint_name = unique_name_from_base("sagemaker-btd-endpoint")
-    
-    pipeline_model.deploy(initial_instance_count=1, 
-                          instance_type=instance_type, 
-                          endpoint_name=endpoint_name,
-                          wait=wait)
-
-if __name__ == "__main__":
-    role=get_execution_role()
-    print(f'Execution role is: {role}')
-
-    sklearn_job_prefix = "amzn-sm-btd-preprocess"
-    xgboost_job_prefix = "amzn-sm-btd-train"
-
-    featurizer, booster = load_models(sklearn_job_prefix, xgboost_job_prefix)
-    
-    sklearn_model = build_sklearn_sagemaker_model(role, featurizer)
-    xgboost_model = build_xgboost_sagemaker_model(role, booster)
-
-    pipeline_model = build_pipeline_model(role, sklearn_model, xgboost_model)
-
-    deploy_model(pipeline_model, "ml.m5.xlarge", wait=False)
