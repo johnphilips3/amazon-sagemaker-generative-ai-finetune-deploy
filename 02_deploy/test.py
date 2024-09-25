@@ -1,28 +1,29 @@
-from sagemaker.predictor import Predictor
-import sys
-import numpy as np
+# Predict
+from sagemaker.huggingface.model import HuggingFacePredictor
 
-def run_test_inferences(endpoint_name):
-    from io import BytesIO
+endpoint_name = "<ENDPOINT_NAME>" #Required if you want to create a predictor without running the previous code
+
+if 'predictor' not in locals() and 'predictor' not in globals():
+    print("Create predictor")
+    predictor = HuggingFacePredictor(
+        endpoint_name=endpoint_name
+    )
+
+base_prompt = f"""
+    <|begin_of_text|><|start_header_id|>user<|end_header_id|>
+    {{question}}
+    <|eot_id|><|start_header_id|>assistant<|end_header_id|>
     
-    predictor = Predictor(endpoint_name=endpoint_name)
+"""
 
-    payload = "L,298.4,308.2,1582,70.7,216"
-    buffer = predictor.predict(payload)
-    np_bytes = BytesIO(buffer)
-    print(f"Inference payload: {payload}")
-    print(f"Inference result: {np.load(np_bytes, allow_pickle=True)}")
+prompt = base_prompt.format(question="What is the context window of Anthropic Claude 2.1 model?")
 
-    payload = "M,298.4,308.2,1582,30.2,214"
-    buffer = predictor.predict(payload)
-    np_bytes = BytesIO(buffer)
-    print(f"Inference payload: {payload}")
-    print(f"Inference result: {np.load(np_bytes, allow_pickle=True)}")
-
-if __name__ == "__main__":
-    if len(sys.argv) == 2:
-        endpoint_name = sys.argv[1]
-        run_test_inferences(endpoint_name)
-    else:
-        print('ERROR: Expected endpoint name as an argument')
-        exit(1)
+predictor.predict({
+	"inputs": prompt,
+    "parameters": {
+        "n_predict": -1,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stop": ["<|start_header_id|>", "<|eot_id|>", "<|start_header_id|>user<|end_header_id|>", "assistant"]
+    }
+})
