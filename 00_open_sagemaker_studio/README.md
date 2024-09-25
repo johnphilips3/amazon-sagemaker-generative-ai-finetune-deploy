@@ -1,6 +1,6 @@
 # Module 0: Open Amazon SageMaker Studio
 
-** Note **  
+[!NOTE]
 This section will need changes based on how this workshop uses SageMaker
 
 1. In the AWS Management Console, search for "SageMaker" and select Amazon SageMaker in the results.	
